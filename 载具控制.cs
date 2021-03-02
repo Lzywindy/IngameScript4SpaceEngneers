@@ -1,7 +1,7 @@
 Program()
 {
     try { InitDatas(); ReadDatas(); } catch (Exception) { StartReady = false; }
-    Runtime.UpdateFrequency = UpdateFrequency.Update1;
+    Runtime.UpdateFrequency = UpdateFrequency.Update1 | UpdateFrequency.Update10 | UpdateFrequency.Update100;
 }
 void Main(string argument, UpdateType updateSource)
 {
@@ -9,6 +9,7 @@ void Main(string argument, UpdateType updateSource)
     {
         switch (updateSource)
         {
+            case UpdateType.IGC:
             case UpdateType.Mod:
             case UpdateType.Script:
             case UpdateType.Terminal:
@@ -18,32 +19,31 @@ void Main(string argument, UpdateType updateSource)
                 if (argument.Contains("EnabledCuriser")) EnabledCuriser = !EnabledCuriser;
                 if (argument.Contains("EnabledThrusters")) EnabledThrusters = !EnabledThrusters;
                 if (argument.Contains("EnabledGyros")) EnabledGyros = !EnabledGyros;
-                if (argument.Contains("IsTank")) WheelsController.TrackVehicle = !WheelsController.TrackVehicle;
                 if (argument.Contains("LoadConfig")) ReadDatas();
                 if (argument.Contains("SaveConfig")) WriteDatas();
                 break;
-            case UpdateType.Update1:
-                PoseCtrl();
-                ThrustControl();
-                WheelsController.Running();
-                break;
-            case UpdateType.Update10:
-                if (!StartReady)
-                    InitDatas();
-                break;
-            case UpdateType.Update100:
-                break;
-            case UpdateType.Once:
-                break;
+            case UpdateType.Update1: PoseCtrl(); ThrustControl(); WheelControl(); AutoCloseDoorController.Running(GridTerminalSystem); break;
+            case UpdateType.Update10: if (!StartReady) InitDatas(); break;
+            case UpdateType.Update100: break;
+            case UpdateType.Once: break;
             default: break;
         }
+        RunningDataShow();
     }
-    catch (Exception)
-    {
-        StartReady = false;
-    }
+    catch (Exception e) { StartReady = false; Echo($"Error:{e.Message}"); Echo($"Error:{e.StackTrace}"); Echo($"Error:{e.Source}"); count = 0; }
 }
 #region InternalFunctions
+private void RunningDataShow()
+{
+    skip = (++skip) % gap;
+    if (skip == 0)
+    {
+        Echo($"Universe Controller Running:[{RunningSignal[(count++) % RunningSignal.Length]}]"); Echo($"Current Controller Role:[{Role}]");
+        if (Role == ControllerRole.Aeroplane || Role == ControllerRole.VTOL) Echo($"Wings Mode:{HasWings}"); if (Role == ControllerRole.VTOL || Role == ControllerRole.SpaceShip) Echo($"Hover Mode:{HoverMode}");
+        if (Role == ControllerRole.Aeroplane || Role == ControllerRole.VTOL || Role == ControllerRole.SpaceShip) Echo($"Curiser Mode:{EnabledCuriser}");
+        Echo($"Thrusters Enabled:{EnabledThrusters}"); Echo($"Gyros Enabled:{EnabledGyros}");
+    }
+}
 private void InitDatas()
 {
     Controller = Utils.GetT(GridTerminalSystem, (IMyShipController block) => block.IsMainCockpit || block.IsUnderControl);
@@ -51,18 +51,18 @@ private void InitDatas()
     if (Utils.IsNull(Controller)) { StartReady = false; return; }
     ThrustControllerSystem.UpdateBlocks(GridTerminalSystem, Controller);
     GyroControllerSystem.UpdateBlocks(GridTerminalSystem, Controller);
-    if (Role == ControllerRole.TrackVehicle || Role == ControllerRole.WheelVehicle || Role == ControllerRole.HoverVehicle)
-        WheelsController.UpdateBlocks(GridTerminalSystem, Controller);
+    WheelsController.UpdateBlocks(GridTerminalSystem, Controller);
     WheelsController.TrackVehicle = Role == ControllerRole.TrackVehicle;
     StartReady = true;
 }
 private void OnModeChange() { _Target_Sealevel = sealevel = Utils.GetSealevel(Controller) ?? 0; }
 private void PoseCtrl()
 {
-    var Rotation = Utils.ProcessRotation(_EnabledCuriser, Controller, RotationCtrlLines, ref ForwardDirection, InitAngularDampener, AngularDampeners, ForwardOrUp, PoseMode
-        , MaximumSpeed, MaxReactions_AngleV, Need2CtrlSignal, LocationSensetive, SafetyStage, IgnoreForwardVelocity,
-        Refer2Velocity, Refer2Gravity, DisabledRotation, ForwardDirectionOverride, PlaneNormalOverride) ?? new Vector3(Controller?.RotationIndicator ?? Vector2.Zero, Controller?.RollIndicator ?? 0);
-    GyroControllerSystem.SetEnabled(EnabledGyros);
+    Vector3 Rotation;
+    bool EnabledGyros_Inner = EnabledGyros;
+    if (Role == ControllerRole.TrackVehicle || Role == ControllerRole.WheelVehicle || Role == ControllerRole.HoverVehicle) { var TurnIndicator = (Controller?.MoveIndicator.X ?? 0); var AngularVelocity = (Controller?.GetShipVelocities().AngularVelocity ?? Vector3D.Zero); EnabledGyros_Inner = EnabledGyros_Inner && ((TurnIndicator != 0 || Vector3.Round(Vector3.TransformNormal(AngularVelocity, Matrix.Transpose(Utils.GetWorldMatrix(Me))) * (new Vector3(0.01f, 1, 0.01f)), 2) != Vector3.Zero)); Rotation = Vector3.Up * 180000F * TurnIndicator + Utils.ProcessDampeners(Controller, InitAngularDampener, AngularDampeners); }
+    else { Rotation = Utils.ProcessRotation(_EnabledCuriser, Controller, RotationCtrlLines, ref ForwardDirection, InitAngularDampener, AngularDampeners, ForwardOrUp, PoseMode, MaximumSpeed, MaxReactions_AngleV, Need2CtrlSignal, LocationSensetive, SafetyStage, IgnoreForwardVelocity, Refer2Velocity, Refer2Gravity, DisabledRotation, ForwardDirectionOverride, PlaneNormalOverride) ?? new Vector3(Controller?.RotationIndicator ?? Vector2.Zero, Controller?.RollIndicator ?? 0); }
+    GyroControllerSystem.SetEnabled(EnabledGyros_Inner);
     GyroControllerSystem.GyrosOverride(Rotation);
 }
 private void ThrustControl()
@@ -81,6 +81,14 @@ private void ThrustControl()
         ThrustControllerSystem.SetupMode((!ForwardOrUp), EnabledAllDirection, (!EnabledThrusters), CtrlOrCruise ? MaximumSpeed : target_speed);
         ThrustControllerSystem.Running(CtrlOrCruise ? Ctrl : Vector3.Forward, diffsealevel, Dampener);
     }
+}
+private void WheelControl()
+{
+    bool NoWheelCtrl = !(Role == ControllerRole.TrackVehicle || Role == ControllerRole.WheelVehicle);
+    WheelsController.TrackVehicle = Role == ControllerRole.TrackVehicle;
+    WheelsController.ForwardIndicator = NoWheelCtrl ? 0 : Controller?.MoveIndicator.Z ?? 0;
+    WheelsController.TurnIndicator = NoWheelCtrl ? 0 : Controller?.MoveIndicator.X ?? 0;
+    WheelsController.Running();
 }
 private double sealevel, _Target_Sealevel;
 private float target_speed = 0, diffsealevel = 0;
@@ -141,6 +149,9 @@ private void WriteDatas()
 }
 private void InitParameters() { HasWings = true; Role = ControllerRole.VTOL; AngularDampeners_Roll = 5; AngularDampeners_Pitch = 5; AngularDampeners_Yaw = 7; SafetyStage = 3; MaxReactions_AngleV = 40; LocationSensetive = 10; EnabledCuriser = false; HoverMode = true; MaxiumFlightSpeed = 1000; MaxiumHoverSpeed = 30; MaximumCruiseSpeed = 80; }
 #endregion
+#region RunningProcess
+private int count = 0; private string[] RunningSignal { get; } = { "- ", "\\", "| ", "/" }; private int skip = 0; private const int gap = 10;
+#endregion
 #region OuterControlLines
 public bool HasWings { get; set; } = false;
 public bool HoverMode
@@ -198,7 +209,7 @@ private Vector3 ThrustsControlLine
             case ControllerRole.SpaceShip: return (Controller?.MoveIndicator ?? Vector3.Zero);
             case ControllerRole.SeaShip: return new Vector3(0, 0, (Controller?.MoveIndicator.Z ?? 0));
             case ControllerRole.Submarine: return new Vector3(0, (Controller?.MoveIndicator.Y ?? 0), (Controller?.MoveIndicator.Z ?? 0));
-            case ControllerRole.TrackVehicle: case ControllerRole.WheelVehicle: case ControllerRole.HoverVehicle: Vector3 Ctrl = Vector3.Backward * (Controller?.MoveIndicator ?? Vector3.Zero); return (Ctrl != Vector3.Zero) ? Ctrl : Vector3.Forward;
+            case ControllerRole.TrackVehicle: case ControllerRole.WheelVehicle: case ControllerRole.HoverVehicle: return Vector3.Backward * (Controller?.MoveIndicator ?? Vector3.Zero);
             default: return Vector3.Zero;
         }
     }
@@ -303,6 +314,7 @@ private MyThrusterController ThrustControllerSystem { get; } = new MyThrusterCon
 private MyGyrosController GyroControllerSystem { get; } = new MyGyrosController();
 private MyWheelsController WheelsController { get; } = new MyWheelsController();
 private Dictionary<string, Dictionary<string, string>> Configs { get; } = new Dictionary<string, Dictionary<string, string>>();
+private MyAutoCloseDoorController AutoCloseDoorController { get; } = new MyAutoCloseDoorController();
 #endregion
 #region APIs
 public class MyWheelsController
@@ -313,11 +325,13 @@ public class MyWheelsController
         this.ShipController = null;
         if (Utils.IsNull(ShipController) || Utils.IsNull(GridTerminalSystem)) return;
         Motors_Hover = Utils.GetTs(GridTerminalSystem, (IMyTerminalBlock thrust) => thrust.BlockDefinition.SubtypeId.Contains("Hover"));
-        if (!Utils.IsNullCollection(Motors_Hover)) { this.ShipController = ShipController; HoverDevices = true; return; }
-        else { HoverDevices = false; }
-        SWheels = Utils.GetTs(GridTerminalSystem, (IMyMotorSuspension wheel) => Math.Sign(ShipController.WorldMatrix.Right.Dot(wheel.WorldMatrix.Up)) > 0.9);
-        MWheels = Utils.GetTs(GridTerminalSystem, (IMyMotorStator wheel) => Math.Sign(ShipController.WorldMatrix.Right.Dot(wheel.WorldMatrix.Up)) > 0.9);
-        if (NullWheels) return; this.ShipController = ShipController;
+        var Group = GridTerminalSystem.GetBlockGroupWithName(WheelsGroupNM);
+        SWheels = Utils.GetTs<IMyMotorSuspension>(Group);
+        MWheels = Utils.GetTs<IMyMotorStator>(Group);
+        this.ShipController = ShipController;
+        if (Utils.IsNullCollection(Motors_Hover)) HoverDevices = false;
+        else { HoverDevices = true; return; }
+        if (NullWheels) return;
         Wheels = Init4GetAction(GridTerminalSystem);
     }
     public ControllerRole ControlMode => NullWheels ? ControllerRole.None : HoverDevices ? ControllerRole.HoverVehicle : TrackVehicle ? ControllerRole.TrackVehicle : ControllerRole.WheelVehicle;
@@ -336,9 +350,11 @@ public class MyWheelsController
     public float Friction { get; set; } = 80f;
     public float TurnFaction { get; set; } = 20f;
     public float MaximumSpeed { get; set; } = 20f;
-    public float ForwardIndicator => ShipController?.MoveIndicator.Z ?? 0;
-    public float TurnIndicator => ShipController?.MoveIndicator.X ?? 0;
-    public bool NullWheels => Utils.IsNull(ShipController) || (Utils.IsNullCollection(SWheels) && Utils.IsNullCollection(MWheels));
+    public float ForwardIndicator { get; set; }
+    public float TurnIndicator { get; set; }
+    public bool NullWheels => Utils.IsNull(ShipController) || (NullSWheel && NullMWheel);
+    public bool NullSWheel => Utils.IsNullCollection(SWheels);
+    public bool NullMWheel => Utils.IsNullCollection(MWheels);
     public bool HoverDevices { get; private set; } = false;
     private Vector3 LinearVelocity => ShipController?.GetShipVelocities().LinearVelocity ?? Vector3.Zero;
     private Action Init4GetAction(IMyGridTerminalSystem GridTerminalSystem)
@@ -475,6 +491,7 @@ public class MyThrusterController
     }
     public void SetupMode(bool UpOrForward, bool EnableAll, bool DisableAll, float MaximumSpeed)
     {
+        if (NullThrust) return;
         if (DisableAll) { EnabledU(false); EnabledF(false); EnabledD(false); EnabledL(false); EnabledR(false); EnabledB(false); return; }
         EnabledU(EnableAll || UpOrForward); EnabledF(EnableAll || (!UpOrForward)); EnabledD(EnableAll); EnabledL(EnableAll); EnabledR(EnableAll); EnabledB(EnableAll); MaxSpeedLimit = MaximumSpeed;
         MiniValue = DisableAll ? 0 : MiniValueC;
@@ -795,10 +812,50 @@ public static class Utils
     public static bool IsNull<T>(T Value) where T : class => Value == null;
     public static T GetT<T>(IMyGridTerminalSystem gridTerminalSystem, Func<T, bool> requst = null) where T : class { List<T> Items = GetTs<T>(gridTerminalSystem, requst); if (IsNullCollection(Items)) return null; else return Items.First(); }
     public static List<T> GetTs<T>(IMyGridTerminalSystem gridTerminalSystem, Func<T, bool> requst = null) where T : class { if (gridTerminalSystem == null) return null; List<T> Items = new List<T>(); gridTerminalSystem.GetBlocksOfType<T>(Items, requst); return Items; }
+    public static T GetT<T>(IMyBlockGroup blockGroup, Func<T, bool> requst = null) where T : class
+    {
+        List<T> Items = GetTs(blockGroup, requst);
+        if (Items.Count > 0)
+            return Items[0];
+        else
+            return null;
+    }
+    public static List<T> GetTs<T>(IMyBlockGroup blockGroup, Func<T, bool> requst = null) where T : class
+    {
+        if (blockGroup == null) return null;
+        List<T> Items = new List<T>();
+        blockGroup.GetBlocksOfType<T>(Items, requst);
+        return Items;
+    }
     public static Matrix GetWorldMatrix(IMyTerminalBlock ShipController) { Matrix me_matrix; ShipController.Orientation.GetMatrix(out me_matrix); return me_matrix; }
     public static bool ExceptKeywords(IMyTerminalBlock block) { foreach (var item in BlackList_ShipController) { if (block.BlockDefinition.SubtypeId.Contains(item)) return false; } return true; }
     private static readonly string[] BlackList_ShipController = new string[] { "Hover", "Torpedo", "Torp", "Payload", "Missile", "At_Hybrid_Main_Thruster_Large", "At_Hybrid_Main_Thruster_Small", };
 }
 public enum ControllerRole { None, Aeroplane, Helicopter, VTOL, SpaceShip, SeaShip, Submarine, TrackVehicle, WheelVehicle, HoverVehicle }
 delegate void MyActionRef<T>(ref T value);
+public class MyAutoCloseDoorController
+{
+    private List<MyAutoCloseDoorTimmer> Timers { get; } = new List<MyAutoCloseDoorTimmer>();
+    public void UpdateBlocks(IMyGridTerminalSystem GridTerminalSystem) { var doors_group = GridTerminalSystem.GetBlockGroupWithName(ACDoorsGroupNM); if (doors_group == null) return; var doors = Utils.GetTs<IMyDoor>(doors_group); foreach (var door in doors) { Timers.Add(new MyAutoCloseDoorTimmer(door)); } }
+    public void Running(IMyGridTerminalSystem GridTerminalSystem) { try { if (Timers.Count == 0) UpdateBlocks(GridTerminalSystem); else { foreach (var Timer in Timers) { Timer.Running(); } } } catch (Exception) { Timers.Clear(); } }
+}
+public class MyAutoCloseDoorTimmer
+{
+    public MyAutoCloseDoorTimmer(IMyDoor Door) { this.Door = Door; }
+    public void Running()
+    {
+        if (Door == null) return;
+        switch (Door.Status)
+        {
+            case DoorStatus.Opening: Count = Gap; return;
+            case DoorStatus.Open: if (Count > 0) Count--; else Door.CloseDoor(); return;
+            default: break;
+        }
+    }
+    private IMyDoor Door;
+    private const int Gap = 20;
+    private int Count;
+}
 #endregion
+private static string WheelsGroupNM = @"Wheels";
+private static string ACDoorsGroupNM = @"ACDoors";
