@@ -24,7 +24,7 @@ void Main(string argument, UpdateType updateSource)
                 break;
             case UpdateType.Update1: PoseCtrl(); ThrustControl(); WheelControl(); AutoCloseDoorController.Running(GridTerminalSystem); break;
             case UpdateType.Update10: if (!StartReady) { InitDatas(); ReadDatas(); } break;
-            case UpdateType.Update100:  break;
+            case UpdateType.Update100: break;
             case UpdateType.Once: break;
             default: break;
         }
@@ -60,8 +60,14 @@ private void PoseCtrl()
 {
     Vector3 Rotation;
     bool EnabledGyros_Inner = EnabledGyros;
-    if (Role == ControllerRole.TrackVehicle || Role == ControllerRole.WheelVehicle || Role == ControllerRole.HoverVehicle) { var TurnIndicator = (Controller?.MoveIndicator.X ?? 0); var AngularVelocity = (Controller?.GetShipVelocities().AngularVelocity ?? Vector3D.Zero); EnabledGyros_Inner = EnabledGyros_Inner && ((TurnIndicator != 0 || Vector3.Round(Vector3.TransformNormal(AngularVelocity, Matrix.Transpose(Utils.GetWorldMatrix(Me))) * (new Vector3(0.01f, 1, 0.01f)), 2) != Vector3.Zero)); Rotation = Vector3.Up * 180000F * TurnIndicator + Utils.ProcessDampeners(Controller, InitAngularDampener, AngularDampeners); }
-    else { Rotation = Utils.ProcessRotation(_EnabledCuriser, Controller, RotationCtrlLines, ref ForwardDirection, InitAngularDampener, AngularDampeners, ForwardOrUp, PoseMode, MaximumSpeed, MaxReactions_AngleV, Need2CtrlSignal, LocationSensetive, SafetyStage, IgnoreForwardVelocity, Refer2Velocity, DisabledRotation, ForwardDirectionOverride, PlaneNormalOverride) ?? new Vector3(Controller?.RotationIndicator ?? Vector2.Zero, Controller?.RollIndicator ?? 0); }
+    if (Role == ControllerRole.HoverVehicle || Role == ControllerRole.TrackVehicle || Role == ControllerRole.WheelVehicle || Role == ControllerRole.SeaShip || Role == ControllerRole.Submarine)
+    {
+        Rotation = Utils.ProcessRotation_GroundVehicle(Controller, RotationCtrlLines, ref ForwardDirection, InitAngularDampener, AngularDampeners, MaxReactions_AngleV, DisabledRotation, ForwardDirectionOverride, PlaneNormalOverride) ?? new Vector3(Controller?.RotationIndicator ?? Vector2.Zero, Controller?.RollIndicator ?? 0);
+    }
+    else
+    {
+        Rotation = Utils.ProcessRotation(_EnabledCuriser, Controller, RotationCtrlLines, ref ForwardDirection, InitAngularDampener, AngularDampeners, ForwardOrUp, PoseMode, MaximumSpeed, MaxReactions_AngleV, Need2CtrlSignal, LocationSensetive, SafetyStage, IgnoreForwardVelocity, Refer2Velocity, DisabledRotation, ForwardDirectionOverride, PlaneNormalOverride) ?? new Vector3(Controller?.RotationIndicator ?? Vector2.Zero, Controller?.RollIndicator ?? 0);
+    }
     GyroControllerSystem.SetEnabled(EnabledGyros_Inner);
     GyroControllerSystem.GyrosOverride(Rotation);
 }
@@ -392,15 +398,19 @@ internal class MyWheelsController
         {
             Wheels += () =>
             {
-                bool EnTrO = (TrackVehicle || (LinearVelocity.LengthSquared() < 120f));
                 var sign = Math.Sign(ShipController.WorldMatrix.Right.Dot(Motor.WorldMatrix.Up));
-                var PropulsionOverride = EnTrO ? DiffTurns(sign) : ForwardIndicator;
-                Motor.Steering = !TrackVehicle;
+                bool EnTrO = (TrackVehicle || (LinearVelocity.LengthSquared() < 4f));
+                float PropulsionOverride = (EnTrO ? DiffTurns(sign) : 0) + (ForwardIndicator * sign);
+                Motor.Brake = PropulsionOverride == 0;
+                Motor.InvertSteer = false;
                 Motor.SetValue<float>(Motor.GetProperty(MotorOverrideId).Id, Math.Sign(PropulsionOverride));
                 Motor.Power = Math.Abs(PropulsionOverride);
+                Motor.Steering = !TrackVehicle;
                 Motor.Friction = MathHelper.Clamp((TurnIndicator != 0) ? (TrackVehicle ? (TurnFaction / Vector3.DistanceSquared(Motor.GetPosition(), ShipController.CubeGrid.GetPosition())) : Friction) : Friction, 0, Friction);
-                Motor.Brake = PropulsionOverride == 0;
-                Motor.InvertSteer = Motor.Steering && EnTrO && (TurnIndicator != 0) && (sign < 0);
+                if (Motor.Steering && EnTrO && TurnIndicator != 0)
+                    Motor.SetValue<float>(Motor.GetProperty(SteerOverrideId).Id, Math.Sign(ShipController.WorldMatrix.Left.Dot(Motor.WorldMatrix.Up)) * (Motor.CustomName.Contains("Rear") ? -1 : 1));
+                else
+                    Motor.SetValue<float>(Motor.GetProperty(SteerOverrideId).Id, 0);
             };
         }
         return Wheels;
@@ -788,6 +798,18 @@ internal static class Utils
             (ReferNormal.Value != Vector3.Zero) ? Dampener(SetupAngle(Calc_Direction_Vector(ReferNormal.Value, ShipController.WorldMatrix.Left), Calc_Direction_Vector(ReferNormal.Value, ShipController.WorldMatrix.Down))) : 0
             ) * MaxReactions_AngleV));
     }
+    public static Vector3? ProcessRotation_GroundVehicle(IMyShipController ShipController, Vector4 RotationCtrlLines, ref Vector3 ForwardDirection, Vector3? InitAngularDampener = null, Vector3? AngularDampeners = null, float MaxReactions_AngleV = 1f, bool DisabledRotation = true, Vector3? ForwardDirectionOverride = null, Vector3? PlaneNormalOverride = null)
+    {
+        if (IsNull(ShipController) || DisabledRotation) return null;
+        Vector3 ReferNormal = PlaneNormalOverride ?? ShipController?.GetNaturalGravity() ?? Vector3.Zero;
+        if (Vector3.IsZero(ReferNormal)) return null;
+        Vector3 Direciton = (ForwardDirectionOverride ?? ShipController.WorldMatrix.Forward) + RotationCtrlLines.W * ShipController.WorldMatrix.Right;
+        ForwardDirection = ProjectOnPlane(Direciton, ReferNormal);
+        return ProcessDampeners(ShipController, InitAngularDampener, AngularDampeners) +
+            new Vector3(Calc_Direction_Vector(ReferNormal, ShipController.WorldMatrix.Backward),
+            Dampener(SetupAngle(Calc_Direction_Vector(Direciton, ShipController.WorldMatrix.Right), Calc_Direction_Vector(Direciton, ShipController.WorldMatrix.Forward))) * 1800000f,
+            Dampener(SetupAngle(Calc_Direction_Vector(ReferNormal, ShipController.WorldMatrix.Left), Calc_Direction_Vector(ReferNormal, ShipController.WorldMatrix.Down)))) * MaxReactions_AngleV;
+    }
     public static float SetupAngle(float current_angular_local, float current_angular_add) { if (Math.Abs(current_angular_local) < 0.005f && current_angular_add < 0f) return current_angular_add; return current_angular_local; }
     public static float Calc_Direction_Vector(Vector3 vector, Vector3 direction) => Vector3.Normalize(direction).Dot(vector);
     public static Vector3 ScaleVectorTimes(Vector3 vector, float Times = 10f) => vector * Times;
@@ -861,5 +883,6 @@ internal const string ACDoorsGroupNM = @"ACDoors";
 internal const string BrakeNM = @"Brake";
 internal const string BackwardNM = @"Backward";
 internal const string MotorOverrideId = @"Propulsion override";
+internal const string SteerOverrideId = @"Steer override";
 internal const string VehicleControllerConfigID = @"VehicleController";
 #endregion
